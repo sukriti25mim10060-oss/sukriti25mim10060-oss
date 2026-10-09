@@ -1,0 +1,299 @@
+// Handwritten Digit Recognition - C++17
+// CSV format: label,pixel1,pixel2,...,pixel784 (MNIST CSV format)
+// Compile: g++ -std=c++17 -O2 HandwrittenDigitRecognition.cpp -o digit_recognition
+// Run:     ./digit_recognition train.csv test.csv
+//
+// Educational neural network implemented without external ML libraries.
+// Architecture: 784 input neurons -> 128 ReLU -> 64 ReLU -> 10 Softmax.
+
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <numeric>
+#include <random>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using namespace std;
+
+struct Sample {
+    vector<double> pixels;
+    int label;
+};
+
+static mt19937 rng(random_device{}());
+
+vector<string> splitCSV(const string& line) {
+    vector<string> fields;
+    string field;
+    stringstream stream(line);
+    while (getline(stream, field, ',')) {
+        size_t first = field.find_first_not_of(" \t\r\n");
+        size_t last = field.find_last_not_of(" \t\r\n");
+        if (first == string::npos) field.clear();
+        else field = field.substr(first, last - first + 1);
+        fields.push_back(field);
+    }
+    return fields;
+}
+
+bool parseNumber(const string& text, double& value) {
+    try {
+        size_t used = 0;
+        value = stod(text, &used);
+        return used == text.size() && isfinite(value);
+    } catch (...) {
+        return false;
+    }
+}
+
+vector<Sample> loadCSV(const string& path) {
+    ifstream file(path);
+    if (!file) throw runtime_error("Cannot open file: " + path);
+
+    vector<Sample> data;
+    string line;
+    bool firstDataLine = true;
+
+    while (getline(file, line)) {
+        if (line.find_first_not_of(" \t\r\n") == string::npos) continue;
+
+        vector<string> fields = splitCSV(line);
+        if (fields.size() < 785) {
+            if (firstDataLine) { firstDataLine = false; continue; }
+            continue;
+        }
+
+        double labelNumber = 0.0;
+        if (!parseNumber(fields[0], labelNumber)) {
+            if (firstDataLine) { firstDataLine = false; continue; }
+            continue;
+        }
+        firstDataLine = false;
+
+        int label = static_cast<int>(labelNumber);
+        if (label < 0 || label > 9 || labelNumber != label) continue;
+
+        Sample sample;
+        sample.label = label;
+        sample.pixels.resize(784);
+
+        bool valid = true;
+        for (int i = 0; i < 784; ++i) {
+            double pixel = 0.0;
+            if (!parseNumber(fields[i + 1], pixel)) {
+                valid = false;
+                break;
+            }
+            if (pixel > 1.0) pixel /= 255.0;
+            sample.pixels[i] = max(0.0, min(1.0, pixel));
+        }
+        if (valid) data.push_back(move(sample));
+    }
+    return data;
+}
+
+vector<double> loadPixelRow(const string& path) {
+    ifstream file(path);
+    if (!file) throw runtime_error("Cannot open file: " + path);
+
+    string line;
+    while (getline(file, line)) {
+        if (line.find_first_not_of(" \t\r\n") != string::npos) break;
+    }
+    if (line.empty()) throw runtime_error("The prediction file is empty.");
+
+    vector<string> fields = splitCSV(line);
+    size_t start = fields.size() >= 785 ? 1 : 0;
+    if (fields.size() - start < 784)
+        throw runtime_error("Expected 784 pixel values, optionally preceded by a label.");
+
+    vector<double> pixels(784);
+    for (int i = 0; i < 784; ++i) {
+        double value = 0.0;
+        if (!parseNumber(fields[start + i], value))
+            throw runtime_error("Invalid pixel value.");
+        if (value > 1.0) value /= 255.0;
+        pixels[i] = max(0.0, min(1.0, value));
+    }
+    return pixels;
+}
+
+class NeuralNetwork {
+    vector<int> sizes;
+    vector<vector<vector<double>>> weights; // weights[layer][neuron][previous neuron]
+    vector<vector<double>> biases;
+
+    double randomWeight(double scale) {
+        uniform_real_distribution<double> distribution(-scale, scale);
+        return distribution(rng);
+    }
+
+    static vector<double> softmax(const vector<double>& values) {
+        double maximum = *max_element(values.begin(), values.end());
+        vector<double> probabilities(values.size());
+        double sum = 0.0;
+        for (size_t i = 0; i < values.size(); ++i) {
+            probabilities[i] = exp(values[i] - maximum);
+            sum += probabilities[i];
+        }
+        for (double& p : probabilities) p /= sum;
+        return probabilities;
+    }
+
+    vector<vector<double>> forward(const vector<double>& input) const {
+        if (input.size() != static_cast<size_t>(sizes[0]))
+            throw invalid_argument("Input must contain 784 pixel values.");
+
+        vector<vector<double>> activations;
+        activations.push_back(input);
+
+        for (size_t layer = 0; layer < weights.size(); ++layer) {
+            vector<double> values(sizes[layer + 1], 0.0);
+            for (int neuron = 0; neuron < sizes[layer + 1]; ++neuron) {
+                double sum = biases[layer][neuron];
+                for (int prev = 0; prev < sizes[layer]; ++prev)
+                    sum += weights[layer][neuron][prev] * activations.back()[prev];
+                values[neuron] = sum;
+            }
+
+            if (layer + 1 == weights.size()) {
+                values = softmax(values);
+            } else {
+                for (double& value : values) value = max(0.0, value); // ReLU
+            }
+            activations.push_back(move(values));
+        }
+        return activations;
+    }
+
+public:
+    NeuralNetwork(int input = 784, int hidden1 = 128, int hidden2 = 64, int output = 10) {
+        sizes = {input, hidden1, hidden2, output};
+
+        for (size_t layer = 0; layer + 1 < sizes.size(); ++layer) {
+            biases.emplace_back(sizes[layer + 1], 0.0);
+            weights.emplace_back(sizes[layer + 1]);
+
+            double scale = sqrt(2.0 / sizes[layer]);
+            for (int neuron = 0; neuron < sizes[layer + 1]; ++neuron) {
+                weights.back()[neuron].resize(sizes[layer]);
+                for (int prev = 0; prev < sizes[layer]; ++prev)
+                    weights.back()[neuron][prev] = randomWeight(scale);
+            }
+        }
+    }
+
+    int predict(const vector<double>& input) const {
+        vector<vector<double>> activations = forward(input);
+        const vector<double>& output = activations.back();
+        return static_cast<int>(max_element(output.begin(), output.end()) - output.begin());
+    }
+
+    double trainOne(const vector<double>& input, int label, double learningRate) {
+        vector<vector<double>> activations = forward(input);
+        int last = static_cast<int>(sizes.size()) - 1;
+        const vector<double>& output = activations.back();
+        double loss = -log(max(output[label], 1e-12));
+
+        vector<vector<double>> deltas(weights.size());
+
+        // Softmax + cross-entropy derivative.
+        deltas[last - 1].resize(sizes[last]);
+        for (int i = 0; i < sizes[last]; ++i)
+            deltas[last - 1][i] = output[i] - (i == label ? 1.0 : 0.0);
+
+        // Backpropagate through hidden layers.
+        for (int layer = last - 2; layer >= 0; --layer) {
+            deltas[layer].assign(sizes[layer + 1], 0.0);
+            for (int neuron = 0; neuron < sizes[layer + 1]; ++neuron) {
+                double error = 0.0;
+                for (int next = 0; next < sizes[layer + 2]; ++next)
+                    error += weights[layer + 1][next][neuron] * deltas[layer + 1][next];
+
+                double activation = activations[layer + 1][neuron];
+                deltas[layer][neuron] = error * (activation > 0.0 ? 1.0 : 0.0);
+            }
+        }
+
+        // Stochastic gradient-descent update.
+        for (int layer = 0; layer < last; ++layer) {
+            for (int neuron = 0; neuron < sizes[layer + 1]; ++neuron) {
+                biases[layer][neuron] -= learningRate * deltas[layer][neuron];
+                for (int prev = 0; prev < sizes[layer]; ++prev) {
+                    weights[layer][neuron][prev] -=
+                        learningRate * deltas[layer][neuron] * activations[layer][prev];
+                }
+            }
+        }
+        return loss;
+    }
+};
+
+double evaluate(const NeuralNetwork& network, const vector<Sample>& data) {
+    if (data.empty()) return 0.0;
+    size_t correct = 0;
+    for (const Sample& sample : data)
+        if (network.predict(sample.pixels) == sample.label) ++correct;
+    return 100.0 * static_cast<double>(correct) / static_cast<double>(data.size());
+}
+
+int main(int argc, char* argv[]) {
+    try {
+        if (argc < 3) {
+            cout << "Handwritten Digit Recognition (C++17)\n"
+                 << "Usage: " << argv[0] << " train.csv test.csv\n"
+                 << "CSV format: label,pixel1,pixel2,...,pixel784\n";
+            return 0;
+        }
+
+        cout << "Loading training data...\n";
+        vector<Sample> trainingData = loadCSV(argv[1]);
+        cout << "Training rows: " << trainingData.size() << '\n';
+
+        cout << "Loading test data...\n";
+        vector<Sample> testData = loadCSV(argv[2]);
+        cout << "Test rows: " << testData.size() << '\n';
+
+        if (trainingData.empty() || testData.empty()) {
+            cerr << "No valid data found. Each row must contain one label and 784 pixels.\n";
+            return 1;
+        }
+
+        NeuralNetwork network;
+        const int epochs = 5;
+        const double learningRate = 0.01;
+
+        for (int epoch = 1; epoch <= epochs; ++epoch) {
+            shuffle(trainingData.begin(), trainingData.end(), rng);
+            double totalLoss = 0.0;
+
+            for (const Sample& sample : trainingData)
+                totalLoss += network.trainOne(sample.pixels, sample.label, learningRate);
+
+            cout << fixed << setprecision(4)
+                 << "Epoch " << epoch << "/" << epochs
+                 << " | Loss: " << totalLoss / trainingData.size()
+                 << " | Test accuracy: " << setprecision(2)
+                 << evaluate(network, testData) << "%\n";
+        }
+
+        cout << "\nEnter optional prediction CSV path (one row of 784 pixels),\n"
+             << "or press Enter to finish: ";
+        string predictionPath;
+        getline(cin >> ws, predictionPath);
+
+        if (!predictionPath.empty()) {
+            vector<double> pixels = loadPixelRow(predictionPath);
+            cout << "Predicted digit: " << network.predict(pixels) << '\n';
+        }
+    } catch (const exception& error) {
+        cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
+    return 0;
+}
