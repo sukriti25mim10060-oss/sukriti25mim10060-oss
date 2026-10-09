@@ -29,7 +29,7 @@
 
 ## 🎯 Overview
 
-This project implements a **fully connected neural network from scratch** to recognize handwritten digits from the MNIST dataset. Unlike using ML libraries, the entire neural network architecture, forward propagation, backpropagation, and optimization algorithms are implemented manually in C#.
+This project implements a **fully connected neural network from scratch** to recognize handwritten digits from the MNIST dataset. Unlike using ML libraries, the entire neural network architecture, forward propagation, backpropagation, and optimization algorithms are implemented manually in C++.
 
 ### Key Highlights
 - ✅ **Custom Neural Network**: No ML libraries used for core algorithm
